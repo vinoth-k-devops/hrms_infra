@@ -25,8 +25,18 @@ pipeline {
         stage('Init') {
             steps {
                 sh '''
-                    echo "📁 Creating backup directory..."
-                    mkdir -p ${BACKUP_DIR}/{server,k8s,jenkins,docker,kubernetes,databases,apps,meta}
+                    echo "Creating backup directory..."
+                    mkdir -p ${BACKUP_DIR}/server
+                    mkdir -p ${BACKUP_DIR}/k8s
+                    mkdir -p ${BACKUP_DIR}/jenkins
+                    mkdir -p ${BACKUP_DIR}/docker
+                    mkdir -p ${BACKUP_DIR}/kubernetes
+                    mkdir -p ${BACKUP_DIR}/databases
+                    mkdir -p ${BACKUP_DIR}/apps
+                    mkdir -p ${BACKUP_DIR}/meta
+
+                    echo "Directories created:"
+                    ls -la ${BACKUP_DIR}/
                 '''
             }
         }
