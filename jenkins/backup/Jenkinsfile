@@ -1,0 +1,189 @@
+pipeline {
+    agent any
+
+    environment {
+        BACKUP_DATE        = sh(script: 'date +%Y%m%d_%H%M', returnStdout: true).trim()
+        BACKUP_DIR         = "/tmp/vinothserver-backup-${BACKUP_DATE}"
+        GDRIVE_REMOTE      = "gdrive:vinothserver-backups"
+        TELEGRAM_BOT_TOKEN = credentials('TELEGRAM_BOT_TOKEN')
+        TELEGRAM_CHAT_ID   = credentials('TELEGRAM_CHAT_ID')
+        KUBECONFIG         = '/home/vinoth/.kube/config'
+    }
+
+    triggers {
+        // Daily at 2 AM
+        cron('0 2 * * *')
+    }
+
+    options {
+        timeout(time: 30, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+    }
+
+    stages {
+
+        stage('Init') {
+            steps {
+                sh '''
+                    echo "📁 Creating backup directory..."
+                    mkdir -p ${BACKUP_DIR}/{server,k8s,jenkins}
+                '''
+            }
+        }
+
+        stage('Backup Server Configs') {
+            steps {
+                sh '''
+                    echo "⚙️  Backing up /etc..."
+                    sudo tar czf ${BACKUP_DIR}/server/etc.tar.gz /etc 2>/dev/null || true
+
+                    echo "🏠 Backing up /home/vinoth..."
+                    tar czf ${BACKUP_DIR}/server/home.tar.gz \
+                        --exclude='/home/vinoth/.cache' \
+                        --exclude='/home/vinoth/snap' \
+                        /home/vinoth 2>/dev/null || true
+
+                    echo "🌐 Backing up cloudflared tunnel..."
+                    tar czf ${BACKUP_DIR}/server/cloudflared.tar.gz \
+                        /home/vinoth/.cloudflared 2>/dev/null || true
+
+                    echo "🔀 Backing up nginx config..."
+                    sudo tar czf ${BACKUP_DIR}/server/nginx.tar.gz \
+                        /etc/nginx 2>/dev/null || true
+
+                    echo "📦 Saving installed packages list..."
+                    dpkg --get-selections > ${BACKUP_DIR}/server/packages.txt
+                    pip3 freeze > ${BACKUP_DIR}/server/pip-packages.txt 2>/dev/null || true
+
+                    echo "⏰ Saving crontabs..."
+                    crontab -l > ${BACKUP_DIR}/server/crontab-vinoth.txt 2>/dev/null || true
+                    sudo crontab -l > ${BACKUP_DIR}/server/crontab-root.txt 2>/dev/null || true
+                '''
+            }
+        }
+
+        stage('Backup Kubernetes Resources') {
+            steps {
+                sh '''
+                    echo "☸️  Exporting K8s resources..."
+
+                    for NS in hrms-dev hrms-stage hrms-prod default kube-system; do
+                        echo "  → Namespace: $NS"
+                        mkdir -p ${BACKUP_DIR}/k8s/${NS}
+
+                        kubectl get all -n ${NS} -o yaml \
+                            > ${BACKUP_DIR}/k8s/${NS}/all-resources.yaml 2>/dev/null || true
+
+                        kubectl get configmaps -n ${NS} -o yaml \
+                            > ${BACKUP_DIR}/k8s/${NS}/configmaps.yaml 2>/dev/null || true
+
+                        kubectl get secrets -n ${NS} -o yaml \
+                            > ${BACKUP_DIR}/k8s/${NS}/secrets.yaml 2>/dev/null || true
+
+                        kubectl get pvc -n ${NS} -o yaml \
+                            > ${BACKUP_DIR}/k8s/${NS}/pvcs.yaml 2>/dev/null || true
+
+                        kubectl get ingress -n ${NS} -o yaml \
+                            > ${BACKUP_DIR}/k8s/${NS}/ingress.yaml 2>/dev/null || true
+                    done
+
+                    echo "  → Cluster-wide resources..."
+                    kubectl get nodes -o yaml \
+                        > ${BACKUP_DIR}/k8s/nodes.yaml 2>/dev/null || true
+                    kubectl get storageclasses -o yaml \
+                        > ${BACKUP_DIR}/k8s/storageclasses.yaml 2>/dev/null || true
+                    kubectl get clusterroles -o yaml \
+                        > ${BACKUP_DIR}/k8s/clusterroles.yaml 2>/dev/null || true
+                '''
+            }
+        }
+
+        stage('Backup Jenkins Home') {
+            steps {
+                sh '''
+                    echo "🔧 Backing up Jenkins jobs & configs..."
+                    sudo tar czf ${BACKUP_DIR}/jenkins/jenkins-jobs.tar.gz \
+                        --exclude='/var/lib/jenkins/workspace' \
+                        --exclude='/var/lib/jenkins/logs' \
+                        --exclude='/var/lib/jenkins/caches' \
+                        /var/lib/jenkins 2>/dev/null || true
+                '''
+            }
+        }
+
+        stage('Compress Full Backup') {
+            steps {
+                sh '''
+                    echo "🗜️  Compressing full backup archive..."
+                    cd /tmp
+                    tar czf vinothserver-backup-${BACKUP_DATE}.tar.gz \
+                        vinothserver-backup-${BACKUP_DATE}/
+
+                    BACKUP_SIZE=$(du -sh /tmp/vinothserver-backup-${BACKUP_DATE}.tar.gz | cut -f1)
+                    echo "BACKUP_SIZE=${BACKUP_SIZE}" > /tmp/backup-meta.env
+                    echo "Backup size: ${BACKUP_SIZE}"
+                '''
+            }
+        }
+
+        stage('Upload to Google Drive') {
+            steps {
+                sh '''
+                    echo "☁️  Uploading to Google Drive..."
+                    rclone copy \
+                        /tmp/vinothserver-backup-${BACKUP_DATE}.tar.gz \
+                        ${GDRIVE_REMOTE}/${BACKUP_DATE}/ \
+                        --progress \
+                        --transfers=4 \
+                        --retries=3
+
+                    echo "🧹 Rotating old backups (keep last 7)..."
+                    rclone delete ${GDRIVE_REMOTE} \
+                        --min-age 7d \
+                        --rmdirs 2>/dev/null || true
+                '''
+            }
+        }
+
+        stage('Cleanup') {
+            steps {
+                sh '''
+                    echo "🗑️  Removing local temp files..."
+                    rm -rf ${BACKUP_DIR}
+                    rm -f /tmp/vinothserver-backup-${BACKUP_DATE}.tar.gz
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            script {
+                def size = sh(script: "grep BACKUP_SIZE /tmp/backup-meta.env | cut -d= -f2", returnStdout: true).trim()
+                sh """
+                    curl -s -X POST https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage \
+                        -d chat_id=${TELEGRAM_CHAT_ID} \
+                        -d parse_mode=Markdown \
+                        -d text="✅ *vinothserver Backup Success*
+Date: ${BACKUP_DATE}
+Size: ${size}
+Stored: gdrive:vinothserver-backups/${BACKUP_DATE}
+Build: #${BUILD_NUMBER}"
+                """
+            }
+        }
+        failure {
+            sh """
+                curl -s -X POST https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage \
+                    -d chat_id=${TELEGRAM_CHAT_ID} \
+                    -d parse_mode=Markdown \
+                    -d text="❌ *vinothserver Backup FAILED*
+Build: #${BUILD_NUMBER}
+Check: ${BUILD_URL}"
+            """
+        }
+        always {
+            sh 'rm -f /tmp/backup-meta.env'
+        }
+    }
+}
