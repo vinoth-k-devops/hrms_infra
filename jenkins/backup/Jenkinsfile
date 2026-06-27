@@ -145,7 +145,9 @@ pipeline {
                         ${GDRIVE_REMOTE}/${BACKUP_DATE}/ \
                         --progress \
                         --transfers=4 \
-                        --retries=3
+                        --retries=3 \
+                        --disable-http2 \
+                        --no-traverse
 
                     echo "🧹 Rotating old backups (keep last 7)..."
                     rclone delete ${GDRIVE_REMOTE} \
