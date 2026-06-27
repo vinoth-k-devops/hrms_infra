@@ -189,7 +189,7 @@ Build: #${BUILD_NUMBER}"
                 curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
                     -d chat_id="${TELEGRAM_CHAT_ID}" \
                     -d parse_mode=Markdown \
-                    --data-urlencode text="❌ vinothserver Backup FAILED
+                    --data-urlencode text="❌ *vinothserver Backup FAILED*
             Build: #'''+ env.BUILD_NUMBER +'''
             Check: '''+ env.BUILD_URL +'''console"
             '''
